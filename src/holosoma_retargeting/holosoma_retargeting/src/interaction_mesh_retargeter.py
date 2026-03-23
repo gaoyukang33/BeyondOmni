@@ -61,6 +61,8 @@ class InteractionMeshRetargeter:
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
+        pose_prior_model_path: str | None = None,
+        w_pose_prior: float = 1.0,
     ):
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
@@ -82,6 +84,8 @@ class InteractionMeshRetargeter:
             foot_sticking_tolerance: tolerance for foot sticking constraints in x, y.
             foot_lock: configuration for explicit frame-range based foot locking constraints.
             nominal_tracking_tau: the time constant for the nominal tracking cost.
+            pose_prior_model_path: path to PDFHR pose prior model checkpoint (.pt).
+            w_pose_prior: weight for the pose prior regularization term.
         """
 
         self.robot_model_path = task_constants.ROBOT_URDF_FILE
@@ -173,6 +177,12 @@ class InteractionMeshRetargeter:
         self.nominal_tracking_tau = nominal_tracking_tau
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
 
+        # --- Pose prior (PDFHR) setup ---
+        self.pose_prior_model = None
+        self.w_pose_prior = w_pose_prior
+        if pose_prior_model_path is not None:
+            self._init_pose_prior(pose_prior_model_path)
+
     def _init_foot_lock(self, foot_lock: FootLockConfig | None) -> None:
         """Initialize foot lock configuration and normalize window mappings."""
         self.foot_lock = foot_lock or FootLockConfig()
@@ -198,6 +208,70 @@ class InteractionMeshRetargeter:
                     raise ValueError(f"Invalid foot lock window with end < start for {key}: {window}")
                 normalized_windows.append((start, end))
             self._foot_lock_windows[side] = tuple(normalized_windows)
+
+    def _init_pose_prior(self, model_path: str) -> None:
+        """Load the PDFHR pose prior model and precompute joint-to-dqa mapping."""
+        import torch  # noqa: E402
+
+        # Add PDF_HR scripts to path for importing PDFHR_Adapter
+        pdf_hr_path = Path(__file__).parent.parent / "PDF_HR" / "scripts"
+        if str(pdf_hr_path) not in sys.path:
+            sys.path.insert(0, str(pdf_hr_path))
+        from PDF_net import PDFHR_Adapter  # type: ignore[import-not-found]  # noqa: E402
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = PDFHR_Adapter(device=device).to(device)
+
+        # Load checkpoint with key renaming for compatibility
+        ckpt = torch.load(model_path, map_location=device)
+        state_dict = ckpt["model"] if "model" in ckpt else ckpt
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            new_key = key.replace("dfnet.lin0", "dfnet.layers.0")
+            new_key = new_key.replace("dfnet.lin1", "dfnet.layers.1")
+            new_key = new_key.replace("dfnet.lin2", "dfnet.layers.2")
+            new_key = new_key.replace("dfnet.lin3", "dfnet.layers.3")
+            new_state_dict[new_key] = value
+        model.load_state_dict(new_state_dict)
+        model.eval()
+
+        self.pose_prior_model = model
+        self._pose_prior_device = device
+        self._torch = torch
+
+        # Precompute mapping: for each of the ROBOT_DOF actuated joints,
+        # find its index within q_a_indices (or -1 if not optimized)
+        actuated_joint_indices = np.arange(7, 7 + self.task_constants.ROBOT_DOF)
+        self._joint_to_qa_map = []
+        for j_idx in actuated_joint_indices:
+            pos = np.where(self.q_a_indices == j_idx)[0]
+            self._joint_to_qa_map.append(int(pos[0]) if len(pos) > 0 else -1)
+        print(f"[PosePrior] Loaded PDFHR model from {model_path} on {device}")
+
+    def _compute_pose_prior_gradient(self, q: np.ndarray) -> tuple[np.ndarray, float]:
+        """Compute the PDFHR pose prior gradient w.r.t. dqa and the current score.
+
+        The MLP is linearized at the current joint configuration:
+            f(q + dq) ≈ f(q) + ∇f(q)^T @ dq
+
+        Returns:
+            gradient_wrt_dqa: shape (nq_a,) — gradient mapped to the dqa optimization space.
+            pose_score: scalar — the raw PDFHR distance score at current q.
+        """
+        torch = self._torch
+        joint_angles = q[7 : 7 + self.task_constants.ROBOT_DOF]
+        tensor = torch.from_numpy(joint_angles).float().unsqueeze(0).to(self._pose_prior_device)
+        tensor.requires_grad_(True)
+        score = self.pose_prior_model(tensor)
+        grad_29 = torch.autograd.grad(score.sum(), tensor)[0].squeeze(0).cpu().numpy()
+
+        # Map 29-dim gradient to nq_a-dim dqa space
+        grad_dqa = np.zeros(self.nq_a)
+        for j in range(self.task_constants.ROBOT_DOF):
+            qa_idx = self._joint_to_qa_map[j]
+            if qa_idx >= 0:
+                grad_dqa[qa_idx] = grad_29[j]
+        return grad_dqa, float(score.item())
 
     def _init_self_collision(self, self_collision: SelfCollisionConfig | None) -> None:
         """Initialize self-collision configuration and precompute geom pairs."""
@@ -460,7 +534,7 @@ class InteractionMeshRetargeter:
                 else:
                     w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
 
-                q, cost = self.iterate(
+                q, cost, loss_breakdown = self.iterate(
                     q_locked=q_locked_list[i],
                     q_n=q,
                     q_t_last=retargeted_motions[-1],
@@ -486,7 +560,14 @@ class InteractionMeshRetargeter:
                 if self.visualize and self.debug:
                     self.draw_q(q)
 
-                pbar.set_postfix(cost=cost)
+                # Display per-term loss breakdown in progress bar
+                postfix = {"total": f"{cost:.4f}"}
+                for key in ("laplacian", "smoothness", "q_diag", "nominal_tracking"):
+                    if loss_breakdown.get(key, 0.0) != 0.0:
+                        postfix[key[:6]] = f"{loss_breakdown[key]:.4f}"
+                if loss_breakdown.get("pose_prior_score", 0.0) != 0.0:
+                    postfix["prior"] = f"{loss_breakdown['pose_prior_score']:.4f}"
+                pbar.set_postfix(postfix)
 
         # Remove previous debug visualization
         if self.debug:
@@ -699,33 +780,51 @@ class InteractionMeshRetargeter:
         # Step size constraints (Lorentz cone)
         constraints += [cp.SOC(self.step_size, dqa)]
 
-        # Objective
+        # Objective — each term is stored with a name for loss breakdown
         obj_terms = []
+        named_costs: dict[str, cp.Expression] = {}
 
-        obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
+        # 1) Laplacian deformation cost
+        cost_laplacian = cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec))
+        obj_terms.append(cost_laplacian)
+        named_costs["laplacian"] = cost_laplacian
 
-        # nominal tracking for selected indices
+        # 2) Nominal tracking for selected indices
+        cost_nominal = None
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
             idx = np.array(self.track_nominal_indices, dtype=int)
             if idx.size > 0:
                 z = dqa[idx] - (q_a_nominal[idx] - q_a_n_last[idx])
-                obj_terms.append(w_nominal_tracking * cp.sum_squares(z))
+                cost_nominal = w_nominal_tracking * cp.sum_squares(z)
+                obj_terms.append(cost_nominal)
+        named_costs["nominal_tracking"] = cost_nominal
 
-        # Q_diag cost
+        # 3) Q_diag cost
         Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
-        obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
+        cost_qdiag = cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last))
+        obj_terms.append(cost_qdiag)
+        named_costs["q_diag"] = cost_qdiag
 
-        # Smoothness cost
+        # 4) Smoothness cost
         dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
         if np.isscalar(self.smooth_weight):
-            obj_terms.append(self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
+            cost_smooth = self.smooth_weight * cp.sum_squares(dqa - dqa_smooth)
         else:
             Wsmooth = np.asarray(self.smooth_weight, dtype=float)
             if Wsmooth.ndim == 1:
-                obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Wsmooth), dqa - dqa_smooth)))
+                cost_smooth = cp.sum_squares(cp.multiply(np.sqrt(Wsmooth), dqa - dqa_smooth))
             else:
-                # if a full matrix was supplied, fall back to quad_form
-                obj_terms.append(cp.quad_form(dqa - dqa_smooth, Wsmooth))
+                cost_smooth = cp.quad_form(dqa - dqa_smooth, Wsmooth)
+        obj_terms.append(cost_smooth)
+        named_costs["smoothness"] = cost_smooth
+
+        # 5) Pose prior cost (linearized MLP gradient)
+        pose_prior_score = 0.0
+        if self.pose_prior_model is not None:
+            grad_pose, pose_prior_score = self._compute_pose_prior_gradient(q)
+            cost_pose_prior = self.w_pose_prior * (grad_pose @ dqa)
+            obj_terms.append(cost_pose_prior)
+            named_costs["pose_prior"] = cost_pose_prior
 
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
@@ -743,11 +842,21 @@ class InteractionMeshRetargeter:
         dqa_star = dqa.value
         cost = problem.value
 
+        # Collect per-term loss breakdown
+        loss_breakdown = {}
+        for name, expr in named_costs.items():
+            if expr is not None and expr.value is not None:
+                loss_breakdown[name] = float(expr.value)
+            else:
+                loss_breakdown[name] = 0.0
+        loss_breakdown["pose_prior_score"] = pose_prior_score
+        loss_breakdown["total"] = float(cost) if cost is not None else 0.0
+
         q_star = np.copy(q)
         q_star[self.q_a_indices] = dqa_star + q_a_n_last
         q_star[3:7] /= np.linalg.norm(q_star[3:7]) + 1e-12
 
-        return q_star, cost
+        return q_star, cost, loss_breakdown
 
     def _is_foot_locked_in_window(self, foot_link_key: str, frame_idx: int) -> bool:
         """Check whether a foot link is locked by configured frame windows."""
@@ -833,9 +942,10 @@ class InteractionMeshRetargeter:
     ):
         """Iterate the solver for multiple iterations."""
         last_cost = np.inf
+        loss_breakdown = {}
         for _ in range(n_iter):
             q_a_n_last = q_n[self.q_a_indices]
-            q_n, cost = self.solve_single_iteration(
+            q_n, cost, loss_breakdown = self.solve_single_iteration(
                 q_locked=q_locked,
                 q_a_n_last=q_a_n_last,
                 q_t_last=q_t_last,
@@ -851,7 +961,7 @@ class InteractionMeshRetargeter:
             if np.isclose(cost, last_cost):
                 break
             last_cost = cost
-        return q_n, cost
+        return q_n, cost, loss_breakdown
 
     def _draw_self_collision_geoms(self):
         """Draw collision cylinders for self-collision geom pairs in viser."""

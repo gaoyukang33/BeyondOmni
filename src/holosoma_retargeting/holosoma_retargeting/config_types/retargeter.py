@@ -90,3 +90,10 @@ class RetargeterConfig:
 
     nominal_tracking_tau: float = 1e6
     """Time constant for the nominal tracking cost."""
+
+    pose_prior_model_path: str | None = None
+    """Path to PDFHR pose prior model checkpoint (.pt file).
+    When provided, a pose naturalness regularization term is added to the optimization."""
+
+    w_pose_prior: float = 1.0
+    """Weight for the pose prior regularization term."""
