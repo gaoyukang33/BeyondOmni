@@ -5,6 +5,7 @@ LAFAN joint positions are fitted to SMPL-X parameters via IK, then visualized as
 Fitted results are cached to disk for fast subsequent loads.
 """
 
+import argparse
 import time
 from pathlib import Path
 
@@ -147,6 +148,7 @@ def fit_smplx_to_lafan(lafan_joints_np, smplx_model, device="cpu", batch_size=64
                 jaw_pose=torch.zeros(B, 3, device=device),
                 leye_pose=torch.zeros(B, 3, device=device),
                 reye_pose=torch.zeros(B, 3, device=device),
+                expression=torch.zeros(B, 10, device=device),
                 return_full_pose=True,
             )
             pred_joints = output.joints[:, smplx_idx, :]  # (B, 22, 3)
@@ -182,6 +184,7 @@ def fit_smplx_to_lafan(lafan_joints_np, smplx_model, device="cpu", batch_size=64
                 jaw_pose=torch.zeros(B, 3, device=device),
                 leye_pose=torch.zeros(B, 3, device=device),
                 reye_pose=torch.zeros(B, 3, device=device),
+                expression=torch.zeros(B, 10, device=device),
                 return_full_pose=True,
             )
             all_vertices.append(output.vertices.cpu().numpy())
@@ -203,10 +206,24 @@ def get_or_fit_smplx(seq_name, human_npy_path, device="cpu"):
     print(f"Fitting SMPL-X to LAFAN joints for '{seq_name}' (this may take a while)...")
     lafan_joints = np.load(human_npy_path, allow_pickle=True).astype(np.float32)
 
-    smplx_model = smplx.create(
-        str(SMPLX_MODEL_DIR), 'smplx', gender='NEUTRAL',
-        use_pca=False, ext='pkl',
-    ).to(device)
+    # smplx.create expects model_path to be the parent of the 'smplx/' subfolder,
+    # OR the direct path to the .pkl file. Try both for compatibility.
+    smplx_model_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.pkl"
+    if smplx_model_path.exists():
+        smplx_model = smplx.create(
+            model_path=str(smplx_model_path),
+            model_type='smplx',
+            gender='NEUTRAL',
+            use_pca=False,
+        ).to(device)
+    else:
+        smplx_model = smplx.create(
+            model_path=str(SMPLX_MODEL_DIR),
+            model_type='smplx',
+            gender='NEUTRAL',
+            use_pca=False,
+            ext='pkl',
+        ).to(device)
     smplx_model.eval()
 
     result = fit_smplx_to_lafan(lafan_joints, smplx_model, device=device)
@@ -219,7 +236,7 @@ def get_or_fit_smplx(seq_name, human_npy_path, device="cpu"):
 # ---------------------------------------------------------------------------
 # Main visualization
 # ---------------------------------------------------------------------------
-def main():
+def main(args):
     sequences = discover_sequences()
     if not sequences:
         print("No matching sequences found. Check directory paths.")
@@ -333,8 +350,14 @@ def main():
             ctrl.on_update(set_camera)
         set_cam_button.on_click(set_camera)
 
-    # Load first sequence
-    load_sequence(seq_names[0])
+    # Load initial sequence
+    initial_seq = seq_names[0]
+    if args.seq and args.seq in sequences:
+        initial_seq = args.seq
+        seq_dropdown.value = initial_seq
+    elif args.seq:
+        print(f"Warning: sequence '{args.seq}' not found, using '{initial_seq}'")
+    load_sequence(initial_seq)
 
     # ---- Main loop ----
     while True:
@@ -367,4 +390,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seq", type=str, default=None, help="Sequence name to visualize, e.g. 'walk1_subject1'")
+    parser.add_argument("--list", action="store_true", help="List all available sequences and exit")
+    args = parser.parse_args()
+
+    if args.list:
+        seqs = discover_sequences()
+        print(f"Available sequences ({len(seqs)}):")
+        for name in sorted(seqs.keys()):
+            print(f"  {name}")
+    else:
+        main(args)
