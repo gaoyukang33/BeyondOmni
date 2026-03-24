@@ -83,6 +83,8 @@ def make_player(
             vo.show_visual = bool(show_meshes_cb.value)
 
     # ---------- Camera controls ----------
+    cam_lock = {"active": False}
+
     with server.gui.add_folder("Camera Settings"):
         cam_pos_x = server.gui.add_number("Camera X", initial_value=0.0, step=0.1)
         cam_pos_y = server.gui.add_number("Camera Y", initial_value=-7.1, step=0.1)
@@ -91,20 +93,25 @@ def make_player(
         cam_toward_y = server.gui.add_number("Camera Toward Y", initial_value=0.0, step=0.1)
         cam_toward_z = server.gui.add_number("Camera Toward Z", initial_value=1.05, step=0.01)
         cam_fov = server.gui.add_number("Camera FOV", initial_value=45.0, step=1.0)
-        set_cam_button = server.gui.add_button("Set Camera")
+        lock_cam_cb = server.gui.add_checkbox("Lock Camera", initial_value=False)
+        set_cam_button = server.gui.add_button("Set Camera (once)")
 
-        def set_camera(_=None):
+        def apply_camera():
             clients = list(server.get_clients().values())
             if not clients:
                 return
-            client = clients[0]
-            client.camera.position = np.array([cam_pos_x.value, cam_pos_y.value, cam_pos_z.value])
-            client.camera.look_at = np.array([cam_toward_x.value, cam_toward_y.value, cam_toward_z.value])
-            client.camera.fov = cam_fov.value * np.pi / 360.0
+            for client in clients:
+                client.camera.position = np.array([cam_pos_x.value, cam_pos_y.value, cam_pos_z.value])
+                client.camera.look_at = np.array([cam_toward_x.value, cam_toward_y.value, cam_toward_z.value])
+                client.camera.fov = cam_fov.value * np.pi / 360.0
 
-        for ctrl in [cam_pos_x, cam_pos_y, cam_pos_z, cam_toward_x, cam_toward_y, cam_toward_z, cam_fov]:
-            ctrl.on_update(set_camera)
-        set_cam_button.on_click(set_camera)
+        set_cam_button.on_click(lambda _: apply_camera())
+
+        @lock_cam_cb.on_update
+        def _(_):
+            cam_lock["active"] = bool(lock_cam_cb.value)
+            if cam_lock["active"]:
+                apply_camera()
 
     # ---------- Use reusable motion control sliders from viser_utils ----------
     create_motion_control_sliders(
@@ -126,21 +133,23 @@ def make_player(
         f"object={'yes' if (config.object_urdf and config.assume_object_in_qpos) else 'no'}"
     )
     print("Open the viewer URL printed above. Close the process (Ctrl+C) to exit.")
-    return server
+    return server, cam_lock, apply_camera
 
 
 def main(cfg: ViserConfig) -> None:
     """Main function for viser player."""
     qpos, fps = load_npz(cfg.qpos_npz)
-    make_player(
+    server, cam_lock, apply_camera = make_player(
         config=cfg,
         qpos=qpos,
         fps=fps,
     )
 
-    # keep process alive
+    # keep process alive; continuously enforce camera lock if active
     while True:
-        time.sleep(1.0)
+        if cam_lock["active"]:
+            apply_camera()
+        time.sleep(0.05)
 
 
 if __name__ == "__main__":
