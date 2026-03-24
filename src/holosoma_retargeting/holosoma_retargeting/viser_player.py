@@ -82,32 +82,50 @@ def make_player(
         if vo is not None:
             vo.show_visual = bool(show_meshes_cb.value)
 
-    # ---------- Camera controls (bidirectional sync) ----------
-    cam_state = {"lock": False, "_suppress_gui_write": False}
+    # ---------- Camera controls ----------
+    # Design: GUI numbers are read-only displays that track the browser camera.
+    # To set camera programmatically: type values then click "Apply to Camera",
+    # or check "Lock Camera" to continuously enforce GUI values.
+    cam_state = {"lock": False}
 
     with server.gui.add_folder("Camera Settings"):
-        cam_pos_x = server.gui.add_number("Camera X", initial_value=0.0, step=0.1)
-        cam_pos_y = server.gui.add_number("Camera Y", initial_value=-7.1, step=0.1)
-        cam_pos_z = server.gui.add_number("Camera Z", initial_value=1.25, step=0.01)
-        cam_toward_x = server.gui.add_number("Camera Toward X", initial_value=0.0, step=0.1)
-        cam_toward_y = server.gui.add_number("Camera Toward Y", initial_value=0.0, step=0.1)
-        cam_toward_z = server.gui.add_number("Camera Toward Z", initial_value=1.05, step=0.01)
-        cam_fov = server.gui.add_number("Camera FOV", initial_value=45.0, step=1.0)
-        lock_cam_cb = server.gui.add_checkbox("Lock Camera", initial_value=False)
-        set_cam_button = server.gui.add_button("Set Camera (once)")
+        cam_pos_x = server.gui.add_number("Camera X", initial_value=0.0, step=0.1, disabled=True)
+        cam_pos_y = server.gui.add_number("Camera Y", initial_value=0.0, step=0.1, disabled=True)
+        cam_pos_z = server.gui.add_number("Camera Z", initial_value=0.0, step=0.01, disabled=True)
+        cam_toward_x = server.gui.add_number("Look-at X", initial_value=0.0, step=0.1, disabled=True)
+        cam_toward_y = server.gui.add_number("Look-at Y", initial_value=0.0, step=0.1, disabled=True)
+        cam_toward_z = server.gui.add_number("Look-at Z", initial_value=0.0, step=0.01, disabled=True)
+        cam_fov_disp = server.gui.add_number("FOV (deg)", initial_value=45.0, step=1.0, disabled=True)
+        snap_button = server.gui.add_button("Snapshot (read current)")
 
-        def apply_camera():
-            """Push GUI values -> browser camera."""
+        @snap_button.on_click
+        def _(_):
+            """Unlock fields so user can edit, pre-filled with current camera."""
+            for ctrl in [cam_pos_x, cam_pos_y, cam_pos_z, cam_toward_x, cam_toward_y, cam_toward_z, cam_fov_disp]:
+                ctrl.disabled = False
+
+        apply_button = server.gui.add_button("Apply to Camera")
+
+        @apply_button.on_click
+        def _(_):
+            """Push GUI values to browser camera once."""
             clients = list(server.get_clients().values())
-            if not clients:
-                return
             for client in clients:
                 client.camera.position = np.array([cam_pos_x.value, cam_pos_y.value, cam_pos_z.value])
                 client.camera.look_at = np.array([cam_toward_x.value, cam_toward_y.value, cam_toward_z.value])
-                client.camera.fov = cam_fov.value * np.pi / 360.0
+                client.camera.fov = cam_fov_disp.value * np.pi / 180.0
+            # Re-lock the fields after applying
+            for ctrl in [cam_pos_x, cam_pos_y, cam_pos_z, cam_toward_x, cam_toward_y, cam_toward_z, cam_fov_disp]:
+                ctrl.disabled = True
+
+        lock_cam_cb = server.gui.add_checkbox("Lock Camera", initial_value=False)
+
+        @lock_cam_cb.on_update
+        def _(_):
+            cam_state["lock"] = bool(lock_cam_cb.value)
 
         def read_camera_to_gui():
-            """Read browser camera -> update GUI number inputs."""
+            """Read browser camera state into GUI number displays."""
             clients = list(server.get_clients().values())
             if not clients:
                 return
@@ -117,8 +135,6 @@ def make_player(
             fov_val = client.camera.fov
             if pos is None or look is None:
                 return
-            # Suppress on_update callbacks while we programmatically write values
-            cam_state["_suppress_gui_write"] = True
             cam_pos_x.value = round(float(pos[0]), 3)
             cam_pos_y.value = round(float(pos[1]), 3)
             cam_pos_z.value = round(float(pos[2]), 3)
@@ -126,25 +142,15 @@ def make_player(
             cam_toward_y.value = round(float(look[1]), 3)
             cam_toward_z.value = round(float(look[2]), 3)
             if fov_val is not None:
-                cam_fov.value = round(float(fov_val) * 360.0 / np.pi, 1)
-            cam_state["_suppress_gui_write"] = False
+                cam_fov_disp.value = round(float(fov_val) * 180.0 / np.pi, 1)
 
-        def on_gui_cam_change(_=None):
-            """When user edits a number input, push to camera once."""
-            if cam_state["_suppress_gui_write"]:
-                return
-            apply_camera()
-
-        for ctrl in [cam_pos_x, cam_pos_y, cam_pos_z, cam_toward_x, cam_toward_y, cam_toward_z, cam_fov]:
-            ctrl.on_update(on_gui_cam_change)
-
-        set_cam_button.on_click(lambda _: apply_camera())
-
-        @lock_cam_cb.on_update
-        def _(_):
-            cam_state["lock"] = bool(lock_cam_cb.value)
-            if cam_state["lock"]:
-                apply_camera()
+        def apply_camera():
+            """Push GUI values to all browser clients."""
+            clients = list(server.get_clients().values())
+            for client in clients:
+                client.camera.position = np.array([cam_pos_x.value, cam_pos_y.value, cam_pos_z.value])
+                client.camera.look_at = np.array([cam_toward_x.value, cam_toward_y.value, cam_toward_z.value])
+                client.camera.fov = cam_fov_disp.value * np.pi / 180.0
 
     # ---------- Use reusable motion control sliders from viser_utils ----------
     create_motion_control_sliders(
@@ -178,15 +184,13 @@ def main(cfg: ViserConfig) -> None:
         fps=fps,
     )
 
-    # Main loop: bidirectional camera sync
+    # Main loop: camera sync
     while True:
         if cam_state["lock"]:
-            # Lock mode: push GUI values to browser camera
             apply_camera()
         else:
-            # Free mode: read browser camera and update GUI numbers
             read_camera_to_gui()
-        time.sleep(0.1)
+        time.sleep(0.15)
 
 
 if __name__ == "__main__":
