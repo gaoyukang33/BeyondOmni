@@ -6,6 +6,7 @@ Fitted results are cached to disk for fast subsequent loads.
 """
 
 import argparse
+import pickle
 import time
 from pathlib import Path
 
@@ -193,6 +194,51 @@ def fit_smplx_to_lafan(lafan_joints_np, smplx_model, device="cpu", batch_size=64
     return {"vertices": all_vertices, "faces": faces}
 
 
+def _create_smplx_model(device="cpu"):
+    """Create SMPL-X model, handling pkl loading manually for compatibility."""
+    pkl_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.pkl"
+
+    # Try smplx.create first; fall back to manual pickle loading if it fails
+    try:
+        model = smplx.create(
+            model_path=str(SMPLX_MODEL_DIR),
+            model_type='smplx',
+            gender='NEUTRAL',
+            use_pca=False,
+            ext='pkl',
+        ).to(device)
+        return model
+    except Exception as e:
+        print(f"smplx.create failed ({e}), trying manual pkl loading...")
+
+    # Manual load: pickle → npz conversion, then let smplx load the npz
+    npz_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.npz"
+    if not npz_path.exists():
+        print(f"Converting {pkl_path} to {npz_path} ...")
+        with open(str(pkl_path), 'rb') as f:
+            data = pickle.load(f, encoding='latin1')
+        # Save each value as a numpy-compatible entry
+        save_dict = {}
+        for k, v in data.items():
+            if hasattr(v, 'toarray'):  # scipy sparse matrix
+                save_dict[k] = np.array(v.toarray())
+            elif isinstance(v, np.ndarray):
+                save_dict[k] = v
+            else:
+                save_dict[k] = np.array(v)
+        np.savez(str(npz_path), **save_dict)
+        print("Conversion done.")
+
+    model = smplx.create(
+        model_path=str(SMPLX_MODEL_DIR),
+        model_type='smplx',
+        gender='NEUTRAL',
+        use_pca=False,
+        ext='npz',
+    ).to(device)
+    return model
+
+
 def get_or_fit_smplx(seq_name, human_npy_path, device="cpu"):
     """Load cached SMPL-X fit or compute and cache it."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -206,24 +252,7 @@ def get_or_fit_smplx(seq_name, human_npy_path, device="cpu"):
     print(f"Fitting SMPL-X to LAFAN joints for '{seq_name}' (this may take a while)...")
     lafan_joints = np.load(human_npy_path, allow_pickle=True).astype(np.float32)
 
-    # smplx.create expects model_path to be the parent of the 'smplx/' subfolder,
-    # OR the direct path to the .pkl file. Try both for compatibility.
-    smplx_model_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.pkl"
-    if smplx_model_path.exists():
-        smplx_model = smplx.create(
-            model_path=str(smplx_model_path),
-            model_type='smplx',
-            gender='NEUTRAL',
-            use_pca=False,
-        ).to(device)
-    else:
-        smplx_model = smplx.create(
-            model_path=str(SMPLX_MODEL_DIR),
-            model_type='smplx',
-            gender='NEUTRAL',
-            use_pca=False,
-            ext='pkl',
-        ).to(device)
+    smplx_model = _create_smplx_model(device)
     smplx_model.eval()
 
     result = fit_smplx_to_lafan(lafan_joints, smplx_model, device=device)
