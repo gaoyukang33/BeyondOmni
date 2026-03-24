@@ -100,6 +100,7 @@ def main(args):
         state["prior"] = load_robot_npz(info["with_prior"], x_offset=robot_offset)
         state["num_frames"] = min(state["baseline"]["num_frames"], state["prior"]["num_frames"])
         state["fps"] = state["baseline"]["fps"]
+        fps_slider.value = state["fps"]
         timestep_slider.max = max(0, state["num_frames"] - 1)
         timestep_slider.value = 0
         print(f"Loaded sequence '{name}': {state['num_frames']} frames, fps={state['fps']}")
@@ -107,6 +108,7 @@ def main(args):
     # ---- GUI ----
     seq_dropdown = server.gui.add_dropdown("Sequence", seq_names, initial_value=seq_names[0])
     playing = server.gui.add_checkbox("Playing", False)
+    fps_slider = server.gui.add_slider("FPS", 1, 120, 1, 30)
     timestep_slider = server.gui.add_slider("Timestep", 0, 100, 1, 0)
 
     @seq_dropdown.on_update
@@ -170,7 +172,7 @@ def main(args):
             prior_frame.wxyz = pr["root_quat_wxyz"][t]
             prior_urdf_vis.update_cfg(pr["joints"][t])
 
-        time.sleep(1.0 / state["fps"])
+        time.sleep(1.0 / max(1, fps_slider.value))
 
 
 if __name__ == "__main__":
