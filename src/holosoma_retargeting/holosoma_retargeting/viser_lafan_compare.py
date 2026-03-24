@@ -45,6 +45,22 @@ SMPLX_INDICES_FOR_LAFAN = [0, 2, 5, 8, 11, 1, 4, 7, 10, 3, 6, 9, 12, 15, 14, 17,
 
 def discover_sequences():
     """Find matching sequences across baseline, with_prior and human dirs."""
+    print(f"[DEBUG] SCRIPT_DIR: {SCRIPT_DIR}")
+    print(f"[DEBUG] BASELINE_DIR: {BASELINE_DIR}  exists={BASELINE_DIR.exists()}")
+    print(f"[DEBUG] WITH_PRIOR_DIR: {WITH_PRIOR_DIR}  exists={WITH_PRIOR_DIR.exists()}")
+    print(f"[DEBUG] HUMAN_DIR: {HUMAN_DIR}  exists={HUMAN_DIR.exists()}")
+
+    if BASELINE_DIR.exists():
+        baseline_files = list(BASELINE_DIR.glob("*_original.npz"))
+        print(f"[DEBUG] Baseline *_original.npz files: {[f.name for f in baseline_files]}")
+        if not baseline_files:
+            all_files = list(BASELINE_DIR.iterdir())
+            print(f"[DEBUG] All files in baseline dir: {[f.name for f in all_files[:20]]}")
+
+    if HUMAN_DIR.exists():
+        human_files = list(HUMAN_DIR.glob("*.npy"))
+        print(f"[DEBUG] Human .npy files: {[f.name for f in human_files[:20]]}")
+
     sequences = {}
     for npz_file in sorted(BASELINE_DIR.glob("*_original.npz")):
         stem = npz_file.stem.replace("_original", "")
