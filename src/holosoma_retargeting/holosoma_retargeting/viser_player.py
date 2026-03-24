@@ -82,6 +82,30 @@ def make_player(
         if vo is not None:
             vo.show_visual = bool(show_meshes_cb.value)
 
+    # ---------- Camera controls ----------
+    with server.gui.add_folder("Camera Settings"):
+        cam_pos_x = server.gui.add_number("Camera X", initial_value=0.0, step=0.1)
+        cam_pos_y = server.gui.add_number("Camera Y", initial_value=-7.1, step=0.1)
+        cam_pos_z = server.gui.add_number("Camera Z", initial_value=1.25, step=0.01)
+        cam_toward_x = server.gui.add_number("Camera Toward X", initial_value=0.0, step=0.1)
+        cam_toward_y = server.gui.add_number("Camera Toward Y", initial_value=0.0, step=0.1)
+        cam_toward_z = server.gui.add_number("Camera Toward Z", initial_value=1.05, step=0.01)
+        cam_fov = server.gui.add_number("Camera FOV", initial_value=45.0, step=1.0)
+        set_cam_button = server.gui.add_button("Set Camera")
+
+        def set_camera(_=None):
+            clients = list(server.get_clients().values())
+            if not clients:
+                return
+            client = clients[0]
+            client.camera.position = np.array([cam_pos_x.value, cam_pos_y.value, cam_pos_z.value])
+            client.camera.look_at = np.array([cam_toward_x.value, cam_toward_y.value, cam_toward_z.value])
+            client.camera.fov = cam_fov.value * np.pi / 360.0
+
+        for ctrl in [cam_pos_x, cam_pos_y, cam_pos_z, cam_toward_x, cam_toward_y, cam_toward_z, cam_fov]:
+            ctrl.on_update(set_camera)
+        set_cam_button.on_click(set_camera)
+
     # ---------- Use reusable motion control sliders from viser_utils ----------
     create_motion_control_sliders(
         server=server,
