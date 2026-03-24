@@ -219,7 +219,8 @@ class InteractionMeshRetargeter:
             sys.path.insert(0, str(pdf_hr_path))
         from PDF_net import PDFHR_Adapter  # type: ignore[import-not-found]  # noqa: E402
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Use CPU to avoid GPU OOM when running multiple parallel workers
+        device = torch.device("cpu")
         model = PDFHR_Adapter(device=device).to(device)
 
         # Load checkpoint with key renaming for compatibility
