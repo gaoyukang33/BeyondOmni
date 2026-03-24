@@ -195,46 +195,44 @@ def fit_smplx_to_lafan(lafan_joints_np, smplx_model, device="cpu", batch_size=64
 
 
 def _create_smplx_model(device="cpu"):
-    """Create SMPL-X model, handling pkl loading manually for compatibility."""
-    pkl_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.pkl"
+    """Create SMPL-X model. Same pattern as viser_for_human_robot.py / src/utils.py.
 
-    # Try smplx.create first; fall back to manual pickle loading if it fails
+    If pkl loading fails (smplx version bug), auto-converts pkl→npz and retries.
+    """
+    pkl_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.pkl"
+    npz_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.npz"
+
+    # Try loading pkl directly (same as original viser_for_human_robot.py)
     try:
         model = smplx.create(
-            model_path=str(SMPLX_MODEL_DIR),
-            model_type='smplx',
-            gender='NEUTRAL',
-            use_pca=False,
-            ext='pkl',
+            str(SMPLX_MODEL_DIR), 'smplx',
+            gender='NEUTRAL', use_pca=False, ext='pkl',
         ).to(device)
         return model
-    except Exception as e:
-        print(f"smplx.create failed ({e}), trying manual pkl loading...")
+    except Exception:
+        pass
 
-    # Manual load: pickle → npz conversion, then let smplx load the npz
-    npz_path = SMPLX_MODEL_DIR / "smplx" / "SMPLX_NEUTRAL.npz"
+    # Fallback: convert pkl→npz with pickle.load(encoding='latin1'), then load npz
     if not npz_path.exists():
-        print(f"Converting {pkl_path} to {npz_path} ...")
+        print(f"Converting {pkl_path.name} → {npz_path.name} for compatibility...")
         with open(str(pkl_path), 'rb') as f:
             data = pickle.load(f, encoding='latin1')
-        # Save each value as a numpy-compatible entry
         save_dict = {}
         for k, v in data.items():
-            if hasattr(v, 'toarray'):  # scipy sparse matrix
+            if hasattr(v, 'toarray'):  # scipy sparse
                 save_dict[k] = np.array(v.toarray())
             elif isinstance(v, np.ndarray):
                 save_dict[k] = v
             else:
-                save_dict[k] = np.array(v)
+                try:
+                    save_dict[k] = np.array(v)
+                except Exception:
+                    pass
         np.savez(str(npz_path), **save_dict)
-        print("Conversion done.")
 
     model = smplx.create(
-        model_path=str(SMPLX_MODEL_DIR),
-        model_type='smplx',
-        gender='NEUTRAL',
-        use_pca=False,
-        ext='npz',
+        str(SMPLX_MODEL_DIR), 'smplx',
+        gender='NEUTRAL', use_pca=False, ext='npz',
     ).to(device)
     return model
 
