@@ -23,7 +23,8 @@ LAFAN1_PKG_DIR = SCRIPT_DIR / "ubisoft-laforge-animation-dataset"
 BVH_DIR = LAFAN1_PKG_DIR / "lafan1" / "lafan1"
 
 ROBOT_DOF = 29
-SKELETON_COLOR = (100, 200, 255)  # light blue
+SKELETON_COLOR = (50, 220, 130)  # bright green — easy to distinguish from pink/yellow robots
+JOINT_RADIUS = 0.025  # meters
 
 # Import LaFAN1 BVH loading utilities
 sys.path.insert(0, str(LAFAN1_PKG_DIR))
@@ -137,24 +138,27 @@ def main(args):
         visible=True,
     )
 
-    # Skeleton visualization (LaFAN1 original motion) — placeholder handles
-    # 21 bones for a 22-joint skeleton (root has no parent)
-    _n_bones = 21
+    # Skeleton visualization (LaFAN1 original motion)
+    _n_bones = 21  # 22 joints, root has no parent
     _n_joints = 22
     skeleton_lines_handle = server.scene.add_line_segments(
         "/lafan_skeleton",
         points=np.zeros((_n_bones, 2, 3), dtype=np.float32),
         colors=np.full((_n_bones, 2, 3), np.array(SKELETON_COLOR, dtype=np.uint8)),
-        line_width=4.0,
+        line_width=8.0,
     )
-    joint_points_handle = server.scene.add_point_cloud(
-        "/lafan_joints",
-        points=np.zeros((_n_joints, 3), dtype=np.float32),
-        colors=np.full((_n_joints, 3), np.array(SKELETON_COLOR, dtype=np.uint8)),
-        point_size=0.03,
-    )
+    # Use individual spheres for joints — much more visible than point cloud
+    joint_sphere_handles = []
+    for j in range(_n_joints):
+        h = server.scene.add_icosphere(
+            f"/lafan_joint/{j}",
+            radius=JOINT_RADIUS,
+            color=SKELETON_COLOR,
+            position=(0.0, 0.0, 0.0),
+        )
+        h.visible = False
+        joint_sphere_handles.append(h)
     skeleton_lines_handle.visible = False
-    joint_points_handle.visible = False
 
     # ---- State ----
     state = {
@@ -175,11 +179,13 @@ def main(args):
         if info.get("bvh") is not None:
             state["lafan"] = load_bvh_motion(info["bvh"])
             skeleton_lines_handle.visible = True
-            joint_points_handle.visible = True
+            for h in joint_sphere_handles:
+                h.visible = True
         else:
             state["lafan"] = None
             skeleton_lines_handle.visible = False
-            joint_points_handle.visible = False
+            for h in joint_sphere_handles:
+                h.visible = False
             print(f"  Warning: no BVH file for sequence '{name}'")
 
         frame_counts = [state["baseline"]["num_frames"], state["prior"]["num_frames"]]
@@ -291,7 +297,8 @@ def main(args):
                     [gpos[lafan["parent_idx"]], gpos[lafan["child_idx"]]], axis=1
                 )  # (21, 2, 3)
                 skeleton_lines_handle.points = segments
-                joint_points_handle.points = gpos
+                for j, h in enumerate(joint_sphere_handles):
+                    h.position = gpos[j]
 
         time.sleep(1.0 / max(1, fps_slider.value))
 
