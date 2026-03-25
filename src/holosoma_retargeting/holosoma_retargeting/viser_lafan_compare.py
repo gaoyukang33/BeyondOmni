@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Visualize two G1 robot retargeting results (baseline vs with_prior) side by side."""
+"""Visualize two G1 robot retargeting results (baseline vs with_prior) side by side,
+with the original LaFAN1 skeleton motion in the center."""
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
@@ -17,8 +19,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 URDF_PATH = SCRIPT_DIR / "models" / "g1" / "g1_29dof.urdf"
 BASELINE_DIR = SCRIPT_DIR / "demo_results_parallel" / "lafan_baseline"
 WITH_PRIOR_DIR = SCRIPT_DIR / "demo_results_parallel" / "lafan_with_prior"
+LAFAN1_PKG_DIR = SCRIPT_DIR / "ubisoft-laforge-animation-dataset"
+BVH_DIR = LAFAN1_PKG_DIR / "lafan1" / "lafan1"
 
 ROBOT_DOF = 29
+SKELETON_COLOR = (100, 200, 255)  # light blue
+
+# Import LaFAN1 BVH loading utilities
+sys.path.insert(0, str(LAFAN1_PKG_DIR))
+from lafan1.extract import read_bvh
+from lafan1.utils import quat_fk
 
 
 def discover_sequences():
@@ -27,12 +37,43 @@ def discover_sequences():
     for npz_file in sorted(BASELINE_DIR.glob("*_original.npz")):
         stem = npz_file.stem.replace("_original", "")
         prior_file = WITH_PRIOR_DIR / npz_file.name
+        bvh_file = BVH_DIR / f"{stem}.bvh"
         if prior_file.exists():
             sequences[stem] = {
                 "baseline": npz_file,
                 "with_prior": prior_file,
+                "bvh": bvh_file if bvh_file.exists() else None,
             }
     return sequences
+
+
+def load_bvh_motion(bvh_path):
+    """Load BVH file, compute global joint positions for all frames."""
+    anim = read_bvh(str(bvh_path))
+    _, global_pos = quat_fk(anim.quats, anim.pos, anim.parents)
+    # Convert Y-up to Z-up: x_new = x, y_new = -z, z_new = y
+    global_pos_zup = np.stack([
+        global_pos[..., 0],
+        -global_pos[..., 2],
+        global_pos[..., 1],
+    ], axis=-1).astype(np.float32)
+    # BVH positions are in centimeters, convert to meters
+    global_pos_zup /= 100.0
+    # Pre-compute bone index pairs for vectorized segment building
+    parents = anim.parents
+    parent_idx = []
+    child_idx = []
+    for i in range(len(parents)):
+        if parents[i] >= 0:
+            parent_idx.append(parents[i])
+            child_idx.append(i)
+    return {
+        "global_pos": global_pos_zup,
+        "parent_idx": np.array(parent_idx),
+        "child_idx": np.array(child_idx),
+        "num_frames": global_pos_zup.shape[0],
+        "num_joints": global_pos_zup.shape[1],
+    }
 
 
 def load_robot_npz(npz_path, x_offset=0.0):
@@ -85,10 +126,30 @@ def main(args):
         cell_size=4, cell_thickness=1, section_size=4, plane="xy",
     )
 
+    # Skeleton visualization (LaFAN1 original motion) — placeholder handles
+    # 21 bones for a 22-joint skeleton (root has no parent)
+    _n_bones = 21
+    _n_joints = 22
+    skeleton_lines_handle = server.scene.add_line_segments(
+        "/lafan_skeleton",
+        points=np.zeros((_n_bones, 2, 3), dtype=np.float32),
+        colors=np.full((_n_bones, 2, 3), np.array(SKELETON_COLOR, dtype=np.uint8)),
+        line_width=4.0,
+    )
+    joint_points_handle = server.scene.add_point_cloud(
+        "/lafan_joints",
+        points=np.zeros((_n_joints, 3), dtype=np.float32),
+        colors=np.full((_n_joints, 3), np.array(SKELETON_COLOR, dtype=np.uint8)),
+        point_size=0.03,
+    )
+    skeleton_lines_handle.visible = False
+    joint_points_handle.visible = False
+
     # ---- State ----
     state = {
         "baseline": None,
         "prior": None,
+        "lafan": None,
         "num_frames": 0,
         "fps": 30,
     }
@@ -98,7 +159,22 @@ def main(args):
         robot_offset = 1.5
         state["baseline"] = load_robot_npz(info["baseline"], x_offset=-robot_offset)
         state["prior"] = load_robot_npz(info["with_prior"], x_offset=robot_offset)
-        state["num_frames"] = min(state["baseline"]["num_frames"], state["prior"]["num_frames"])
+
+        # Load LaFAN1 BVH
+        if info.get("bvh") is not None:
+            state["lafan"] = load_bvh_motion(info["bvh"])
+            skeleton_lines_handle.visible = True
+            joint_points_handle.visible = True
+        else:
+            state["lafan"] = None
+            skeleton_lines_handle.visible = False
+            joint_points_handle.visible = False
+            print(f"  Warning: no BVH file for sequence '{name}'")
+
+        frame_counts = [state["baseline"]["num_frames"], state["prior"]["num_frames"]]
+        if state["lafan"] is not None:
+            frame_counts.append(state["lafan"]["num_frames"])
+        state["num_frames"] = min(frame_counts)
         state["fps"] = state["baseline"]["fps"]
         fps_slider.value = state["fps"]
         timestep_slider.max = max(0, state["num_frames"] - 1)
@@ -171,6 +247,16 @@ def main(args):
             prior_frame.position = pr["root_pos"][t]
             prior_frame.wxyz = pr["root_quat_wxyz"][t]
             prior_urdf_vis.update_cfg(pr["joints"][t])
+
+            # LaFAN1 skeleton
+            if state["lafan"] is not None:
+                lafan = state["lafan"]
+                gpos = lafan["global_pos"][t]  # (22, 3)
+                segments = np.stack(
+                    [gpos[lafan["parent_idx"]], gpos[lafan["child_idx"]]], axis=1
+                )  # (21, 2, 3)
+                skeleton_lines_handle.points = segments
+                joint_points_handle.points = gpos
 
         time.sleep(1.0 / max(1, fps_slider.value))
 
