@@ -17,10 +17,10 @@ from viser.extras import ViserUrdf
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 URDF_PATH = SCRIPT_DIR / "models" / "g1" / "g1_29dof.urdf"
-BASELINE_DIR = SCRIPT_DIR / "demo_results_parallel" / "lafan_baseline"
-WITH_PRIOR_DIR = SCRIPT_DIR / "demo_results_parallel" / "lafan_with_prior"
+BASELINE_DIR = SCRIPT_DIR / "demo_results_parallel" / "g1" / "robot_only" / "lafan_baseline"
+WITH_PRIOR_DIR = SCRIPT_DIR / "demo_results_parallel" / "g1" / "robot_only" / "lafan_with_prior"
 LAFAN1_PKG_DIR = SCRIPT_DIR / "ubisoft-laforge-animation-dataset"
-BVH_DIR = LAFAN1_PKG_DIR / "lafan1" / "lafan1"
+BVH_DIR = SCRIPT_DIR  / "lafan1"
 
 ROBOT_DOF = 29
 SKELETON_COLOR = (100, 200, 255)  # light blue
@@ -54,11 +54,11 @@ def load_bvh_motion(bvh_path):
     # Convert Y-up to Z-up: x_new = x, y_new = -z, z_new = y
     global_pos_zup = np.stack([
         global_pos[..., 0],
-        -global_pos[..., 2],
+        global_pos[..., 2],
         global_pos[..., 1],
     ], axis=-1).astype(np.float32)
     # BVH positions are in centimeters, convert to meters
-    global_pos_zup /= 100.0
+    global_pos_zup /= 120.0
     # Y-axis offset to align skeleton with robots (adjust as needed)
     global_pos_zup[..., 1] += 0.3
     # Pre-compute bone index pairs for vectorized segment building
