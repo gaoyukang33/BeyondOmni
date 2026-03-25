@@ -59,6 +59,8 @@ def load_bvh_motion(bvh_path):
     ], axis=-1).astype(np.float32)
     # BVH positions are in centimeters, convert to meters
     global_pos_zup /= 100.0
+    # Y-axis offset to align skeleton with robots (adjust as needed)
+    global_pos_zup[..., 1] += 0.3
     # Pre-compute bone index pairs for vectorized segment building
     parents = anim.parents
     parent_idx = []
@@ -120,10 +122,19 @@ def main(args):
     prior_frame = server.scene.add_frame("/with_prior", show_axes=False)
     prior_urdf_vis = ViserUrdf(server, urdf, root_node_name="/with_prior", mesh_color_override=(237, 236, 194))
 
-    # Ground grid
-    server.scene.add_grid(
-        "/grid", width=100, height=100, position=(0.0, 0.0, 0.0),
-        cell_size=4, cell_thickness=1, section_size=4, plane="xy",
+    # Background settings: ground grid + shadow-receiving box
+    box_size = 100
+    ground_grid = server.scene.add_grid(
+        "/grid", width=box_size, height=box_size, position=(0.0, -40.0, 0.01),
+        cell_size=4, cell_thickness=1, section_size=4,
+        plane="xy", shadow_opacity=0.0,
+    )
+    bg_box = server.scene.add_box(
+        name="/box", dimensions=(box_size, box_size, box_size),
+        position=(0.0, -40.0, -box_size // 2),
+        color=(170, 170, 150), material='standard', side='double',
+        cast_shadow=False, flat_shading=True, receive_shadow=True,
+        visible=True,
     )
 
     # Skeleton visualization (LaFAN1 original motion) — placeholder handles
@@ -214,6 +225,30 @@ def main(args):
         for ctrl in [cam_pos_x, cam_pos_y, cam_pos_z, cam_toward_x, cam_toward_y, cam_toward_z, fov]:
             ctrl.on_update(set_camera)
         set_cam_button.on_click(set_camera)
+
+    # Background position controls
+    with server.gui.add_folder("Background Settings"):
+        box_x = server.gui.add_number(label="Box position X", initial_value=0.0, step=5.0)
+        box_y = server.gui.add_number(label="Box position Y", initial_value=-40.0, step=5.0)
+        current_z = [0.0]  # mutable container for nonlocal-like access
+
+        box_z = server.gui.add_number(label="Box position Z", initial_value=0.0, step=0.01)
+
+        def set_box_pos_xy(_):
+            bg_box.position = (box_x.value, box_y.value, bg_box.position[2])
+            ground_grid.position = (box_x.value, box_y.value, ground_grid.position[2])
+
+        for ctrl in [box_x, box_y]:
+            ctrl.on_update(set_box_pos_xy)
+
+        @box_z.on_update
+        def _(_):
+            delta_z = box_z.value - current_z[0]
+            current_z[0] = box_z.value
+            bg_box.position = (bg_box.position[0], bg_box.position[1], bg_box.position[2] + delta_z)
+            ground_grid.position = (ground_grid.position[0], ground_grid.position[1], ground_grid.position[2] + delta_z)
+            cam_pos_z.value = cam_pos_z.value + delta_z
+            cam_toward_z.value = cam_toward_z.value + delta_z
 
     # Load initial sequence
     initial_seq = seq_names[0]
