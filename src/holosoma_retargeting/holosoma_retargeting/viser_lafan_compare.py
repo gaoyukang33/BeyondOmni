@@ -17,14 +17,14 @@ from viser.extras import ViserUrdf
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 URDF_PATH = SCRIPT_DIR / "models" / "g1" / "g1_29dof.urdf"
-BASELINE_DIR = SCRIPT_DIR / "demo_results_parallel" / "g1" / "robot_only" / "lafan_baseline"
-WITH_PRIOR_DIR = SCRIPT_DIR / "demo_results_parallel" / "g1" / "robot_only" / "lafan_with_prior"
+BASELINE_DIR = SCRIPT_DIR / "demo_results_parallel" /"g1" / "robot_only" /"lafan_baseline"
+WITH_PRIOR_DIR = SCRIPT_DIR / "demo_results_parallel" /"g1" / "robot_only" /"lafan_with_prior"
 LAFAN1_PKG_DIR = SCRIPT_DIR / "ubisoft-laforge-animation-dataset"
-BVH_DIR = SCRIPT_DIR  / "lafan1"
+BVH_DIR = SCRIPT_DIR /  "lafan1"
 
 ROBOT_DOF = 29
-SKELETON_COLOR = (50, 220, 130)  # bright green — easy to distinguish from pink/yellow robots
-JOINT_RADIUS = 0.025  # meters
+SKELETON_COLOR = [25, 25, 112] # bright green — easy to distinguish from pink/yellow robots
+JOINT_RADIUS = 0.03  # meters
 
 # Import LaFAN1 BVH loading utilities
 sys.path.insert(0, str(LAFAN1_PKG_DIR))
@@ -145,7 +145,7 @@ def main(args):
         "/lafan_skeleton",
         points=np.zeros((_n_bones, 2, 3), dtype=np.float32),
         colors=np.full((_n_bones, 2, 3), np.array(SKELETON_COLOR, dtype=np.uint8)),
-        line_width=8.0,
+        line_width=4.0,
     )
     # Use individual spheres for joints — much more visible than point cloud
     joint_sphere_handles = []
@@ -153,7 +153,8 @@ def main(args):
         h = server.scene.add_icosphere(
             f"/lafan_joint/{j}",
             radius=JOINT_RADIUS,
-            color=SKELETON_COLOR,
+            subdivisions=2,
+            color=[0, 191, 255],
             position=(0.0, 0.0, 0.0),
         )
         h.visible = False
